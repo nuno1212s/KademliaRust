@@ -1,0 +1,106 @@
+syntax = "proto3";
+package p2pserver;
+
+option java_multiple_files = true;
+option java_package = "me.evmanu";
+option java_outer_classname = "DistLedgerService";
+option objc_class_prefix = "HLW";
+
+service P2P {
+
+  rpc ping(Ping) returns (Ping) {}
+
+  //rpc store(Store) returns (Store) {}
+
+  //rpc findNode(TargetID) returns (stream FoundNode) {}
+
+ // rpc findValue(TargetID) returns (stream FoundValue) {}
+
+  //rpc requestCRC(CRCRequest) returns (CRCResponse) {}
+
+  //rpc broadcastMessage(Broadcast) returns (BroadcastResponse) {}
+
+  //rpc sendMessage(Message) returns (MessageResponse) {}
+}
+
+message Ping {
+  bytes nodeID = 1;
+  int32 requestingNodePort = 2;
+}
+
+message TargetID {
+  bytes requestingNodeID = 1;
+  int32 requestNodePort = 2;
+  bytes targetID = 3;
+}
+
+message Store {
+  bytes requestingNodeID = 1;
+  int32 requestingNodePort = 2;
+
+  bytes owningNodeID = 3;
+  bytes key = 4;
+  bytes value = 5;
+}
+
+enum StoreKind {
+  VALUE_FOUND = 0;
+  NODES = 1;
+}
+
+message FoundValue {
+
+  StoreKind valueKind = 1;
+  bytes key = 2;
+  bytes value = 3;
+
+  bytes nodeID = 4;
+  string nodeAdress = 5;
+  int32 port = 6;
+
+}
+
+message FoundNode {
+  bytes nodeID = 1;
+  string nodeAddress = 2;
+  int32 port = 3;
+  int64 lastSeen = 4;
+}
+
+message CRCRequest {
+
+  bytes challengingNodeID = 1;
+  int32 challengingNodePort = 2;
+  int64 challenge = 3;
+
+}
+
+message CRCResponse {
+  bytes challengedNodeID = 1;
+  int64 challenge = 2;
+  int64 response = 3;
+}
+
+message Broadcast {
+  bytes requestingNodeID = 1;
+  int32 requestingNodePort = 2;
+
+  bytes messageID = 3;
+  int32 height = 4;
+  bytes messageContent = 5;
+}
+
+message BroadcastResponse {
+  bool seen = 1;
+}
+
+message Message {
+  bytes sendingNodeID = 1;
+  int32 sendingNodePort = 2;
+
+  bytes message = 3;
+}
+
+message MessageResponse {
+  bytes response = 1;
+}
