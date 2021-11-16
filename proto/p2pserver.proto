@@ -10,9 +10,9 @@ service P2P {
 
   rpc ping(Ping) returns (Ping) {}
 
-  //rpc store(Store) returns (Store) {}
+  rpc store(Store) returns (Store) {}
 
-  //rpc findNode(TargetID) returns (stream FoundNode) {}
+  rpc findNode(TargetID) returns (stream FoundNode) {}
 
  // rpc findValue(TargetID) returns (stream FoundValue) {}
 
@@ -25,6 +25,7 @@ service P2P {
 
 message Ping {
   bytes nodeID = 1;
+  //The port that we can reach the server of the client that sent us the request
   int32 requestingNodePort = 2;
 }
 
