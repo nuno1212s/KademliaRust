@@ -19,7 +19,7 @@ pub fn gen_random_id() -> Vec<u8> {
 
     let mut rng = rand::thread_rng();
 
-    for i in 0..byte_count {
+    for _i in 0..byte_count {
         vec.push(rng.gen());
     }
 

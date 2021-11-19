@@ -7,11 +7,15 @@ use crate::kademlia::p2pnode::P2PNode;
 
 use crate::p2p_server::p2p_server::{P2pServer};
 use crate::kademlia::p2pstandards;
-use crate::kademlia::p2pstandards::gen_random_id;
 
 
 pub mod p2p_server {
     tonic::include_proto!("p2pserver");
+}
+
+pub mod operations {
+    pub mod operations;
+    pub mod node_ops;
 }
 
 mod kademlia;

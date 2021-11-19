@@ -14,13 +14,13 @@ service P2P {
 
   rpc findNode(TargetID) returns (stream FoundNode) {}
 
- // rpc findValue(TargetID) returns (stream FoundValue) {}
+  rpc findValue(TargetID) returns (stream FoundValue) {}
 
   //rpc requestCRC(CRCRequest) returns (CRCResponse) {}
 
-  //rpc broadcastMessage(Broadcast) returns (BroadcastResponse) {}
+  rpc broadcastMessage(Broadcast) returns (BroadcastResponse) {}
 
-  //rpc sendMessage(Message) returns (MessageResponse) {}
+  rpc sendMessage(Message) returns (MessageResponse) {}
 }
 
 message Ping {

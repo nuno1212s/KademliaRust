@@ -1,16 +1,15 @@
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
-use tonic::codegen::futures_core;
-use tonic::codegen::futures_core::Stream;
-use tokio_stream::wrappers::ReceiverStream;
 use crate::kademlia::p2pnode::{NodeTriple, P2PNode, StoredKeyMetadata};
-use crate::p2p_server::p2p_server::{P2p};
-use crate::p2p_server::{Ping, Store, FoundNode, TargetId};
+use crate::p2p_server::{Broadcast, BroadcastResponse, FoundNode, FoundValue, Message, MessageResponse, Ping, Store, TargetId};
+use crate::p2p_server::p2p_server::P2p;
+use crate::p2pstandards::bin_to_hex;
 
 #[derive(Debug)]
 pub struct MyP2PServer {
@@ -24,6 +23,24 @@ impl MyP2PServer {
 
     fn get_node_ref(&self) -> Arc<P2PNode> {
         self.node.clone()
+    }
+
+    fn notify_node_seen(&self, addr: &Option<SocketAddr>, node_id: Vec<u8>, port: u32) {
+        match addr {
+            Some(addr) => {
+                //Register that we have seen the node
+                let current_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH).unwrap().as_millis();
+
+                let recv_node_triple = NodeTriple::new(node_id,
+                                                       port, addr.ip(),
+                                                       current_time,
+                                                       self.get_node().get_node_id());
+
+                self.get_node().handle_seen_node(recv_node_triple);
+            }
+            None => {}
+        }
     }
 }
 
@@ -42,20 +59,8 @@ impl P2p for MyP2PServer {
 
         let ping_req = request.into_inner();
 
-        match possible_addr {
-            Some(addr) => {
-                //Register that we have seen the node
-                let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-
-                let recv_node_triple = NodeTriple::new(ping_req.node_id,
-                                                       ping_req.requesting_node_port as u32, addr.ip(),
-                                                       current_time,
-                                                       self.get_node().get_node_id());
-
-                self.get_node().handle_seen_node(recv_node_triple);
-            }
-            None => {}
-        }
+        self.notify_node_seen(&possible_addr, ping_req.node_id.clone(),
+                              ping_req.requesting_node_port as u32);
 
         Ok(Response::new(reply))
     }
@@ -64,6 +69,9 @@ impl P2p for MyP2PServer {
         let possible_addr = request.remote_addr();
 
         let store_req = request.into_inner();
+
+        self.notify_node_seen(&possible_addr, store_req.requesting_node_id.clone(),
+                              store_req.requesting_node_port as u32);
 
         let node_info = self.get_node();
 
@@ -79,22 +87,6 @@ impl P2p for MyP2PServer {
 
         node_info.store_value(value);
 
-        match possible_addr {
-            Some(addr) => {
-                //Register that we have seen the node
-                let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-
-                let recv_node_triple = NodeTriple::new(store_req.requesting_node_id.clone(),
-                                                       store_req.requesting_node_port as u32,
-                                                       addr.ip(),
-                                                       current_time,
-                                                       self.get_node().get_node_id());
-
-                self.get_node().handle_seen_node(recv_node_triple);
-            }
-            None => {}
-        }
-
         Ok(Response::new(store_req))
     }
 
@@ -103,12 +95,16 @@ impl P2p for MyP2PServer {
     async fn find_node(&self, req: Request<TargetId>) -> SendServerStream<Self::findNodeStream> {
         let (tx, rx) = mpsc::channel(4);
 
+        let addr = req.remote_addr();
+
         let target_req = req.into_inner();
+
+        self.notify_node_seen(&addr, target_req.requesting_node_id.clone(),
+                              target_req.request_node_port as u32);
 
         let node = self.get_node_ref();
 
         tokio::spawn(async move {
-
             let close_nodes =
                 node.find_k_closest_nodes(&target_req.target_id);
 
@@ -125,5 +121,98 @@ impl P2p for MyP2PServer {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    type findValueStream = ReceiverStream<Result<FoundValue, Status>>;
+
+    async fn find_value(&self, req: Request<TargetId>) -> SendServerStream<Self::findValueStream> {
+        let (tx, rx) = mpsc::channel(4);
+
+        let addr = req.remote_addr();
+
+        let target_req = req.into_inner();
+
+        self.notify_node_seen(&addr, target_req.requesting_node_id.clone(),
+                              target_req.request_node_port as u32);
+
+        let node = self.get_node_ref();
+
+        tokio::spawn(async move {
+            let opt_value = node.find_value(&target_req.target_id);
+
+            match opt_value {
+                Some(value) => {
+                    let reply = FoundValue {
+                        value_kind: 0,
+                        key: value.key().clone(),
+                        value: value.value().clone(),
+                        node_id: value.owner_node_id().clone(),
+                        //TODO: Fill this out
+                        node_adress: String::from(""),
+                        port: 0,
+                    };
+
+                    tx.send(Ok(reply)).await;
+                }
+                None => {
+                    let closest_nodes = node.find_k_closest_nodes(&target_req.target_id);
+
+                    for node in closest_nodes.iter() {
+                        let reply = FoundValue {
+                            value_kind: 1,
+                            key: node.get_node_id().clone(),
+                            value: vec![],
+                            node_id: node.get_node_id().clone(),
+                            node_adress: node.get_address().to_string(),
+                            port: node.get_node_port() as i32,
+                        };
+
+                        tx.send(Ok(reply)).await;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn broadcast_message(&self, req: Request<Broadcast>) -> Result<Response<BroadcastResponse>, Status> {
+        let addr = req.remote_addr();
+
+        let broadcast = req.into_inner();
+
+        self.notify_node_seen(&addr, broadcast.requesting_node_id.clone(),
+                              broadcast.requesting_node_port as u32);
+
+        let mut seen = false;
+
+        if self.get_node().register_seen_msg(broadcast.message_id.clone()) {} else {
+            seen = true;
+        }
+
+        let reply = BroadcastResponse {
+            seen
+        };
+
+        Ok(Response::new(reply))
+    }
+
+    async fn send_message(&self, req: Request<Message>) -> Result<Response<MessageResponse>,
+        Status> {
+        let address = req.remote_addr();
+
+        let reply = req.into_inner();
+
+        self.notify_node_seen(&address, reply.sending_node_id.clone(),
+                              reply.sending_node_port as u32);
+
+        let resp = MessageResponse {
+            response: vec![]
+        };
+
+        println!("Received a message from the node {}",
+                 bin_to_hex(self.get_node().get_node_id()));
+
+        Ok(Response::new(resp))
     }
 }

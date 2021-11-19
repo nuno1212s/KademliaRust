@@ -1,16 +1,18 @@
 use std::cmp::Ordering;
-use std::collections::{VecDeque, HashMap, HashSet, BTreeSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::ops::DerefMut;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
 use num::BigUint;
 
-use crate::kademlia::p2pstandards::{get_k_bucket_for, bin_to_hex, NODE_ID_SIZE, K};
+use crate::kademlia::p2pstandards::{bin_to_hex, get_k_bucket_for, K, NODE_ID_SIZE};
+use crate::operations::operations::{Operation};
 use crate::p2pstandards::distance;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq)]
 pub struct NodeTriple {
     node_id: Vec<u8>,
     node_port: u32,
@@ -103,7 +105,17 @@ impl Hash for NodeTriple {
     }
 }
 
-#[derive(Debug)]
+impl PartialEq for NodeTriple {
+    fn eq(&self, other: &Self) -> bool {
+        if self.get_node_id().eq(other.get_node_id()) {
+            return true;
+        }
+
+        false
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StoredKeyMetadata {
     key: Vec<u8>,
     owner_node_id: Vec<u8>,
@@ -124,6 +136,7 @@ impl StoredKeyMetadata {
             last_updated,
         }
     }
+
     pub fn key(&self) -> &Vec<u8> {
         &self.key
     }
@@ -160,9 +173,11 @@ pub struct P2PNode {
     seen_messages: Mutex<HashSet<Vec<u8>>>,
     stored_values: RwLock<HashMap<Vec<u8>, StoredKeyMetadata>>,
     published_values: Mutex<HashMap<Vec<u8>, StoredKeyMetadata>>,
+    //The current active operations on this node
+    active_operations: Mutex<Vec<Arc<dyn Operation>>>,
 }
 
-impl P2PNode {
+impl P2PNode{
     pub fn new(node_id: Vec<u8>) -> Self {
         let mut k_buckets = Vec::with_capacity(NODE_ID_SIZE as usize);
 
@@ -180,6 +195,7 @@ impl P2PNode {
             seen_messages: Mutex::new(HashSet::new()),
             stored_values: RwLock::new(HashMap::new()),
             published_values: Mutex::new(HashMap::new()),
+            active_operations: Mutex::new(vec![]),
         }
     }
 
@@ -187,10 +203,10 @@ impl P2PNode {
         &self.node_id
     }
 
-    fn get_k_bucket(&self, bucketInd: &u32) -> &RwLock<VecDeque<NodeTriple>> {
-        assert!(*bucketInd < NODE_ID_SIZE);
+    fn get_k_bucket(&self, bucket_ind: &u32) -> &RwLock<VecDeque<NodeTriple>> {
+        assert!(*bucket_ind < NODE_ID_SIZE);
 
-        &self.k_buckets[*bucketInd as usize]
+        &self.k_buckets[*bucket_ind as usize]
     }
 
     fn get_stored_values(&self) -> &RwLock<HashMap<Vec<u8>, StoredKeyMetadata>> {
@@ -199,6 +215,10 @@ impl P2PNode {
 
     fn get_published_values(&self) -> &Mutex<HashMap<Vec<u8>, StoredKeyMetadata>> {
         &self.published_values
+    }
+
+    fn active_operations(&self) -> &Mutex<Vec<Arc<dyn Operation>>> {
+        &self.active_operations
     }
 
     fn node_wait_list(&self) -> &Vec<Mutex<VecDeque<NodeTriple>>> {
@@ -211,6 +231,48 @@ impl P2PNode {
         stored_values_lock.insert(value.key().clone(), value);
 
         ()
+    }
+
+    pub fn register_seen_msg(&self, key: Vec<u8>) -> bool {
+        let mut seen_msgs = self.seen_messages.lock().unwrap();
+
+        seen_msgs.insert(key)
+    }
+
+    pub fn find_value(&self, key: &Vec<u8>) -> Option<StoredKeyMetadata> {
+        let stored_values_lock = self.stored_values.read().unwrap();
+
+        match stored_values_lock.get(key) {
+            Some(value) => { Option::Some((*value).clone()) }
+            None => Option::None
+        }
+    }
+
+    pub fn register_operation(&self, operation: Arc<dyn Operation>) {
+        let mut active_ops = self.active_operations().lock().unwrap();
+
+        active_ops.push(operation);
+    }
+
+    pub fn unregister_operation(&self, operation: &dyn Operation) -> bool {
+        let mut active_ops = self.active_operations.lock().unwrap();
+
+        let position = active_ops.iter().position(|p| {
+            if p.identifier().eq(operation.identifier()) {
+                return true;
+            }
+
+            false
+        });
+
+        match position {
+            Some(pos) => {
+                active_ops.remove(pos);
+
+                true
+            }
+            None => { false }
+        }
     }
 
     pub fn boostrap(&self, boostrap_nodes: Vec<NodeTriple>) {
@@ -234,7 +296,7 @@ impl P2PNode {
         //TODO: Perform node lookup operation on our own node id
     }
 
-    fn update_sorted_nodes(&self, node_count: u32, k_bucket: u32, mut sorted_nodes: &mut BTreeSet<SearchNodeTriple>,
+    fn update_sorted_nodes(&self, node_count: u32, k_bucket: u32, sorted_nodes: &mut BTreeSet<SearchNodeTriple>,
                            lookup_id: &Vec<u8>) {
         let k_bucket = self.get_k_bucket(&k_bucket).read().unwrap();
 
@@ -267,7 +329,7 @@ impl P2PNode {
     }
 
     pub fn find_closest_nodes(&self, node_count: u32, node_id: &Vec<u8>) -> Vec<NodeTriple> {
-        let bucket_for_node = get_k_bucket_for(self.get_node_id(), node_id);
+        let bucket_for_node = get_k_bucket_for(self.get_node_id(), node_id) as i32;
 
         let mut sorted_nodes = BTreeSet::<SearchNodeTriple>::new();
 
@@ -275,31 +337,32 @@ impl P2PNode {
         //As that is the bucket that contains the nodes that are closest to it
         //Then we start expanding equally to the left and right buckets
         //Until we have filled the node set, or we have gone through all buckets.
-        for i in 0..NODE_ID_SIZE {
-            if bucket_for_node + i < NODE_ID_SIZE {
-                self.update_sorted_nodes(node_count, bucket_for_node + i,
+        for i_ in 0..NODE_ID_SIZE {
+            let i = i_ as i32;
+
+            if bucket_for_node + i < NODE_ID_SIZE as i32 {
+                self.update_sorted_nodes(node_count, (bucket_for_node + i) as u32,
                                          &mut sorted_nodes, node_id);
             }
 
             //i == 0 is already included in the previous if
             if bucket_for_node - i >= 0 && i != 0 {
-                self.update_sorted_nodes(node_count, bucket_for_node - i, &mut sorted_nodes,
+                self.update_sorted_nodes(node_count, (bucket_for_node - i) as u32, &mut sorted_nodes,
                                          node_id);
             }
 
-            if (bucket_for_node + i > NODE_ID_SIZE && bucket_for_node - i < 0) || sorted_nodes.len() >= node_count as usize { break; }
+            if (bucket_for_node + i > NODE_ID_SIZE as i32 && bucket_for_node - i < 0) || sorted_nodes.len() >= node_count as usize { break; }
         }
 
         let mut final_vec = Vec::with_capacity(sorted_nodes.len());
 
         while !sorted_nodes.is_empty() {
-
             let possible_node = sorted_nodes.pop_first();
 
             match possible_node {
                 Some(node) => {
                     final_vec.push(node.node_triple)
-                },
+                }
                 None => {}
             }
         }
@@ -307,32 +370,32 @@ impl P2PNode {
         final_vec
     }
 
-    fn append_waiting_node(&self, seenNode: NodeTriple, k_bucket: &u32) {
+    fn append_waiting_node(&self, seen_node: NodeTriple, k_bucket: &u32) {
         let mut waitlist = self.node_wait_list()[*k_bucket as usize]
             .lock().unwrap();
 
-        waitlist.push_back(seenNode);
+        waitlist.push_back(seen_node);
     }
 
-    pub fn handle_seen_node(&self, mut seenNode: NodeTriple) {
+    pub fn handle_seen_node(&self, mut seen_node: NodeTriple) {
         let bucket_for_seen_node = get_k_bucket_for(self.get_node_id(),
-                                                    seenNode.get_node_id());
+                                                    seen_node.get_node_id());
 
-        let hex_seen_node_id = bin_to_hex(seenNode.get_node_id());
+        let hex_seen_node_id = bin_to_hex(seen_node.get_node_id());
 
         println!("Node {} belongs in bucket {}", hex_seen_node_id, bucket_for_seen_node);
 
         let mut k_bucket =
             self.get_k_bucket(&bucket_for_seen_node).write().unwrap();
 
-        seenNode.set_last_seen(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
+        seen_node.set_last_seen(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis());
 
         let mut already_present = false;
 
         let mut ind = 0;
 
         for node in k_bucket.iter() {
-            if node.get_node_id().eq(seenNode.get_node_id()) {
+            if node.get_node_id().eq(seen_node.get_node_id()) {
                 already_present = true;
 
                 break;
@@ -344,7 +407,7 @@ impl P2PNode {
         k_bucket.remove(ind);
 
         if already_present {
-            k_bucket.push_back(seenNode);
+            k_bucket.push_back(seen_node);
 
             //We no longer need the lock guard as we aren't going to do any other modifications
             drop(k_bucket);
@@ -363,11 +426,11 @@ impl P2PNode {
                 //If it does respond, put it at the tail of the list and ignore this one
                 println!("K bucket is full, appending to the wait list and pinging head");
 
-                self.append_waiting_node(seenNode, &bucket_for_seen_node);
+                self.append_waiting_node(seen_node, &bucket_for_seen_node);
 
                 self.ping_head_of_bucket(&bucket_for_seen_node);
             } else {
-                k_bucket.push_back(seenNode);
+                k_bucket.push_back(seen_node);
 
                 //I just dropped it here because of the print statement, don't really
                 //want to get caught up on OS garbage if we reach large traffic counts
@@ -379,8 +442,8 @@ impl P2PNode {
         }
     }
 
-    pub fn handle_failed_node_ping(&self, failedNode: &NodeTriple) {
-        let bucket_for_failed_node = get_k_bucket_for(self.get_node_id(), failedNode.get_node_id());
+    pub fn handle_failed_node_ping(&self, failed_node: &NodeTriple) {
+        let bucket_for_failed_node = get_k_bucket_for(self.get_node_id(), failed_node.get_node_id());
 
         let mut k_bucket = self.get_k_bucket(&bucket_for_failed_node).write().unwrap();
 
@@ -388,7 +451,7 @@ impl P2PNode {
         let mut ind = 0;
 
         for node in k_bucket.iter() {
-            if node.get_node_id().eq(failedNode.get_node_id()) {
+            if node.get_node_id().eq(failed_node.get_node_id()) {
                 present = true;
 
                 break;
