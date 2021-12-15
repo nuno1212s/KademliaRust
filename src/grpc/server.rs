@@ -146,10 +146,9 @@ impl P2p for MyP2PServer {
                         value_kind: 0,
                         key: value.key().clone(),
                         value: value.value().clone(),
-                        node_id: value.owner_node_id().clone(),
-                        //TODO: Fill this out
-                        node_adress: String::from(""),
-                        port: 0,
+                        owning_node_id: value.owner_node_id().clone(),
+                        last_republished: value.last_republished(),
+                        last_updated: value.last_updated(),
                     };
 
                     tx.send(Ok(reply)).await;
@@ -157,14 +156,17 @@ impl P2p for MyP2PServer {
                 None => {
                     let closest_nodes = node.find_k_closest_nodes(&target_req.target_id);
 
+                    let time = SystemTime::now().duration_since(UNIX_EPOCH)
+                        .unwrap().as_millis();
+
                     for node in closest_nodes.iter() {
                         let reply = FoundValue {
                             value_kind: 1,
                             key: node.get_node_id().clone(),
                             value: vec![],
-                            node_id: node.get_node_id().clone(),
-                            node_adress: node.get_address().to_string(),
-                            port: node.get_node_port() as i32,
+                            owning_node_id: value.owner_node_id().clone(),
+                            last_republished: time,
+                            last_updated: time,
                         };
 
                         tx.send(Ok(reply)).await;

@@ -1,15 +1,15 @@
 use std::fmt::Debug;
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use crate::kademlia::p2pnode::NodeTriple;
-
-pub trait Consumer<T>: Sync + Send + Debug {
-    fn consume(self: &Self, food: T);
-}
+use crate::operations::node_ops::{NodeLookupOperation, RefreshBucketOperation};
 
 pub trait Operation: Sync + Send + Debug {
     fn execute(self: Arc<Self>);
 
-    fn has_finished(self: Arc<Self>) -> bool;
+    fn future(self: &Self) -> Option<Arc<JoinHandle<()>>>;
+
+    fn has_finished(self: &Self) -> bool;
 
     fn identifier(self: &Self) -> &Vec<u8>;
 }
@@ -26,4 +26,12 @@ pub enum NodeOperationState {
     WaitingResponse,
     Responded,
     Failed,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub enum Operations {
+
+    NodeLookupOperation(Arc<NodeLookupOperation>),
+    RefreshBucketOperation(Arc<RefreshBucketOperation>)
+
 }

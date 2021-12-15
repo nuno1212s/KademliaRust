@@ -54,10 +54,9 @@ message FoundValue {
   StoreKind valueKind = 1;
   bytes key = 2;
   bytes value = 3;
-
-  bytes nodeID = 4;
-  string nodeAdress = 5;
-  int32 port = 6;
+  bytes owningNodeID = 4;
+  uint64 lastRepublished = 5;
+  uint64 lastUpdated = 6;
 
 }
 

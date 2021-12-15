@@ -1,4 +1,4 @@
-#![feature(map_first_last)]
+#![feature(map_first_last, fn_traits)]
 
 use std::sync::Arc;
 use tonic::{transport::Server};
@@ -16,6 +16,7 @@ pub mod p2p_server {
 pub mod operations {
     pub mod operations;
     pub mod node_ops;
+    pub mod content_ops;
 }
 
 mod kademlia;

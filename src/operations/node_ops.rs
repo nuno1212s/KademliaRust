@@ -1,15 +1,17 @@
+use std::cell::Ref;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::fmt::{Debug, Formatter};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::time;
 use tokio::task::JoinHandle;
+use tokio::time;
 
 use crate::kademlia::p2pnode::NodeTriple;
-use crate::operations::operations::{Consumer, NodeOperationState, Operation};
+use crate::operations::operations::{NodeOperationState, Operation, Operations};
 use crate::P2PNode;
-use crate::p2pstandards::{ALPHA, get_k_bucket_for, K};
+use crate::p2pstandards::{ALPHA, bin_to_hex, get_k_bucket_for, K, NODE_ID_SIZE, xor};
 
 const TIME_INTERVAL: Duration = Duration::from_millis(1000);
 
@@ -17,19 +19,47 @@ const TIME_INTERVAL: Duration = Duration::from_millis(1000);
 Node lookup operation
 Runs a lookup operation on a given ID, as described by the kademlia protocol
 */
-#[derive(Debug)]
-struct NodeLookupOperation {
+pub struct NodeLookupOperation {
     lookup_id: Vec<u8>,
     local_node: Arc<P2PNode>,
     current_ops: Mutex<HashMap<NodeTriple, NodeOperationState>>,
     waiting_resp: Mutex<HashMap<NodeTriple, u128>>,
     called_done: AtomicBool,
     finished: AtomicBool,
-    future: Mutex<Option<JoinHandle<()>>>,
-    consumer: Box<dyn Consumer<Vec<NodeTriple>>>,
+    future: Mutex<Option<Arc<JoinHandle<()>>>>,
+    on_completed: Box<dyn Fn(Vec<NodeTriple>) -> () + Send + Sync>,
 }
 
+/*
+Refresh bucket operation
+
+Refreshes a given bucket by performing a NodeLookupOperation on a random ID within that bucket
+ */
+#[derive(Debug)]
+pub struct RefreshBucketOperation {
+    k_bucket: u32,
+    owning_node: Arc<P2PNode>,
+    finished: AtomicBool,
+    node_lookup: Mutex<Option<Arc<NodeLookupOperation>>>,
+}
+
+
 impl NodeLookupOperation {
+    fn new(lookup_id: Vec<u8>, local_node: Arc<P2PNode>,
+           on_completed: fn(Vec<NodeTriple>) -> ()) -> Self {
+        Self {
+            lookup_id,
+            local_node,
+            current_ops: Mutex::new(HashMap::new()),
+            waiting_resp: Mutex::new(HashMap::new()),
+            called_done: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
+            future: Mutex::new(Option::None),
+            on_completed: Box::new(on_completed),
+        }
+    }
+
+
     fn ask(&self) -> bool {
         let mut waiting_resp = self.waiting_resp.lock().unwrap();
 
@@ -143,12 +173,19 @@ impl NodeLookupOperation {
     fn set_finished(&self, finished: bool) {
         self.finished.store(finished, Ordering::Relaxed);
     }
+
+    fn has_finished(&self) -> bool {
+        self.finished.load(Ordering::Relaxed)
+    }
 }
 
 impl Operation for NodeLookupOperation {
-
     fn execute(self: Arc<Self>) {
         let self_res = self.clone();
+
+        let mut opt_future = self.future.lock().unwrap();
+
+        self.local_node().register_ongoing_operation(Operations::NodeLookupOperation(self.clone()));
 
         let future = tokio::spawn(async move {
             let mut interval = time::interval(TIME_INTERVAL.clone());
@@ -161,13 +198,14 @@ impl Operation for NodeLookupOperation {
                         let responded_nodes =
                             self_res.closest_k_nodes_with_state(NodeOperationState::Responded);
 
-                        self_res.consumer.consume( responded_nodes);
+                        self_res.on_completed.call((responded_nodes, ));
 
                         let k_bucket = get_k_bucket_for(self_res.lookup_id(),
                                                         self_res.local_node().get_node_id());
                     }
 
                     self_res.set_finished(true);
+
 
                     break;
                 }
@@ -176,14 +214,21 @@ impl Operation for NodeLookupOperation {
             }
         });
 
-        let mut opt_future = self.future.lock().unwrap();
-
-        *opt_future = Option::Some(future);
-
-        self.local_node.register_operation(self.clone());
+        *opt_future = Option::Some(Arc::new(future));
     }
 
-    fn has_finished(self: Arc<Self>) -> bool {
+    fn future(self: &Self) -> Option<Arc<JoinHandle<()>>> {
+        let future = self.future.lock().unwrap();
+
+        match &*future {
+            Some(future_handle) => {
+                Option::Some(future_handle.clone())
+            }
+            None => Option::None
+        }
+    }
+
+    fn has_finished(self: &Self) -> bool {
         self.finished.load(Ordering::Relaxed)
     }
 
@@ -194,11 +239,106 @@ impl Operation for NodeLookupOperation {
 
 impl PartialEq for NodeLookupOperation {
     fn eq(&self, other: &Self) -> bool {
-
         if self.lookup_id().eq(other.lookup_id()) {
             return true;
         }
 
         false
+    }
+}
+
+impl Eq for NodeLookupOperation {}
+
+impl Debug for NodeLookupOperation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NodeLookupOp {{node_id: {}, lookup_id: {}, finished: {:?}}}",
+               bin_to_hex(self.local_node().get_node_id()),
+               bin_to_hex(self.lookup_id()),
+               self.has_finished())
+    }
+}
+
+impl RefreshBucketOperation {
+    fn generate_id_for_bucket(&self) -> Vec<u8> {
+        let capacity = (NODE_ID_SIZE / 8) as usize;
+
+        let mut result = Vec::with_capacity(capacity);
+
+        let num_byte_zeros = ((NODE_ID_SIZE - self.k_bucket()) / 8) as usize;
+        let num_bit_zeros = (8 - (self.k_bucket() % 8)) as usize;
+
+        for i in 0..num_byte_zeros {
+            result[i] = 0;
+        }
+
+        let mut byte_set: u8 = 0x01;
+
+        for _i in 0..(8 - num_bit_zeros) {
+            byte_set *= 2;
+        }
+
+        result[num_byte_zeros] = byte_set;
+
+        for i in num_byte_zeros + 1..capacity {
+            result[i] = 0xFF;
+        }
+
+        xor(self.owning_node().get_node_id(), &result)
+    }
+
+    pub fn k_bucket(&self) -> u32 {
+        self.k_bucket
+    }
+
+    pub fn owning_node(&self) -> &Arc<P2PNode> {
+        &self.owning_node
+    }
+}
+
+impl Operation for RefreshBucketOperation {
+    fn execute(self: Arc<Self>) {
+        println!("Refreshing bucket {}", self.k_bucket);
+
+        let node_in_bucket = self.generate_id_for_bucket();
+
+        let node_lookup_op = NodeLookupOperation::new(node_in_bucket,
+                                                      self.owning_node.clone(),
+                                                      |result| {});
+
+        let arc_node = Arc::new(node_lookup_op);
+
+        let mut node_lookup = self.node_lookup.lock().unwrap();
+
+        *node_lookup = Option::Some(arc_node.clone());
+
+        arc_node.execute();
+    }
+
+    fn future(self: &Self) -> Option<Arc<JoinHandle<()>>> {
+        let lookup_op = self.node_lookup.lock().unwrap();
+
+        match &*lookup_op {
+            Some(lookup_op_r) => {
+                lookup_op_r.future()
+            }
+            None => Option::None
+        }
+    }
+
+    fn has_finished(self: &Self) -> bool {
+        self.finished.load(Ordering::Relaxed)
+    }
+
+    fn identifier(self: &Self) -> &Vec<u8> {
+        //TODO: Create an ID for this operation ?
+        self.owning_node.get_node_id()
+    }
+}
+
+impl Eq for RefreshBucketOperation {}
+
+impl PartialEq for RefreshBucketOperation {
+    fn eq(&self, other: &Self) -> bool {
+        self.identifier().eq(other.identifier())
     }
 }

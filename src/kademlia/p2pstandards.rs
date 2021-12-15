@@ -42,6 +42,19 @@ pub fn distance(id1: &Vec<u8>, id2: &Vec<u8>) -> BigUint {
     id1_int.bitxor(id2_int)
 }
 
+pub fn xor(id1: &Vec<u8>, id2: &Vec<u8>) -> Vec<u8> {
+
+    assert_eq!(id1.len(), id2.len());
+
+    let mut result = Vec::with_capacity(id1.len());
+
+    for i in 0..id1.len() {
+        result[i] = id1[i] ^ id2[i];
+    }
+
+    result
+}
+
 
 pub fn bin_to_hex(bin: &Vec<u8>) -> String {
 

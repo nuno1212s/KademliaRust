@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use num::BigUint;
 
 use crate::kademlia::p2pstandards::{bin_to_hex, get_k_bucket_for, K, NODE_ID_SIZE};
-use crate::operations::operations::{Operation};
+use crate::operations::operations::{Operation, Operations};
 use crate::p2pstandards::distance;
 
 #[derive(Clone, Debug, Eq)]
@@ -174,10 +174,10 @@ pub struct P2PNode {
     stored_values: RwLock<HashMap<Vec<u8>, StoredKeyMetadata>>,
     published_values: Mutex<HashMap<Vec<u8>, StoredKeyMetadata>>,
     //The current active operations on this node
-    active_operations: Mutex<Vec<Arc<dyn Operation>>>,
+    active_operations: Mutex<Vec<Operations>>,
 }
 
-impl P2PNode{
+impl P2PNode {
     pub fn new(node_id: Vec<u8>) -> Self {
         let mut k_buckets = Vec::with_capacity(NODE_ID_SIZE as usize);
 
@@ -217,7 +217,7 @@ impl P2PNode{
         &self.published_values
     }
 
-    fn active_operations(&self) -> &Mutex<Vec<Arc<dyn Operation>>> {
+    fn active_operations(&self) -> &Mutex<Vec<Operations>> {
         &self.active_operations
     }
 
@@ -245,33 +245,6 @@ impl P2PNode{
         match stored_values_lock.get(key) {
             Some(value) => { Option::Some((*value).clone()) }
             None => Option::None
-        }
-    }
-
-    pub fn register_operation(&self, operation: Arc<dyn Operation>) {
-        let mut active_ops = self.active_operations().lock().unwrap();
-
-        active_ops.push(operation);
-    }
-
-    pub fn unregister_operation(&self, operation: &dyn Operation) -> bool {
-        let mut active_ops = self.active_operations.lock().unwrap();
-
-        let position = active_ops.iter().position(|p| {
-            if p.identifier().eq(operation.identifier()) {
-                return true;
-            }
-
-            false
-        });
-
-        match position {
-            Some(pos) => {
-                active_ops.remove(pos);
-
-                true
-            }
-            None => { false }
         }
     }
 
@@ -504,6 +477,31 @@ impl P2PNode{
         let mut waitlist_lock = self.node_wait_list()[*k_bucket as usize].lock().unwrap();
 
         waitlist_lock.pop_front()
+    }
+
+    pub fn register_ongoing_operation(&self, operation: Operations) {
+        let mut active_ops = self.active_operations.lock().unwrap();
+
+        active_ops.push(operation)
+    }
+
+    pub fn mark_operation_closed(&self, operation: Operations) {
+        let mut active_ops = self.active_operations.lock().unwrap();
+
+        let pos = active_ops.iter().rposition(|op| {
+            if op.eq(&operation) {
+                return true;
+            }
+
+            false
+        });
+
+        match pos {
+            Some(index) => {
+                active_ops.remove(index);
+            }
+            None => {}
+        }
     }
 }
 
